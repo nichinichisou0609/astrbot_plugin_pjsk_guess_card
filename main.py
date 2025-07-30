@@ -14,6 +14,7 @@ from datetime import datetime
 from pilmoji import Pilmoji
 from urllib.error import URLError
 from urllib.parse import urlparse
+import aiohttp
 
 
 try:
