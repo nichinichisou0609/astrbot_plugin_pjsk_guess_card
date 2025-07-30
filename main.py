@@ -393,11 +393,19 @@ class GuessCardPlugin(Star):  # type: ignore
         
         # 修正: 使用 card['id'] 和 card_type 来构建正确的问题图片文件名
         question_img_name = f"{card['id']}_card_{card_type}_{difficulty}.png"
-        question_img_path = self.resources_dir / "questions" / question_img_name
+        answer_image_filename = f"card_{card_type}.png"
 
-        if not question_img_path.exists():
-            logger.error(f"问题图片未找到: {question_img_path}")
-            return None
+        # 当使用本地资源时，检查图片是否存在
+        if self.config.get("use_local_resources", True):
+            question_img_path = self.resources_dir / "questions" / question_img_name
+            if not question_img_path.exists():
+                logger.error(f"问题图片未找到: {question_img_path}")
+                return None
+
+            answer_image_path = self.resources_dir / "member" / card["assetbundleName"] / answer_image_filename
+            if not answer_image_path.exists():
+                logger.error(f"预处理的答案图片未找到: {answer_image_path}")
+                return None
 
         character = self.characters_map.get(card["characterId"])
         if not character:
@@ -416,13 +424,7 @@ class GuessCardPlugin(Star):  # type: ignore
             base_score += 1
         
         # 获取答案卡牌图片路径 (已预先压缩)
-        answer_image_filename = f"card_{card_type}.png"
-        answer_image_path = self.resources_dir / "member" / card["assetbundleName"] / answer_image_filename
         
-        if not answer_image_path.exists():
-            logger.error(f"预处理的答案图片未找到: {answer_image_path}")
-            return None
-            
         return {
             "card": card,
             "difficulty": difficulty,
