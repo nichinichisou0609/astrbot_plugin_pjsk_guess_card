@@ -5,17 +5,18 @@ import re
 import time
 import os
 import sqlite3
-import logging
+import io
 from typing import List, Dict, Optional, Tuple, Union
 from pathlib import Path
 from jinja2 import Template
 from PIL import Image, ImageDraw, ImageFont
 from datetime import datetime
 from pilmoji import Pilmoji
-from urllib.request import urlopen
 from urllib.error import URLError
 from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
+import aiohttp
+
 
 try:
     # 兼容Pillow >= 9.1.0, 使用 Resampling 枚举
@@ -26,15 +27,14 @@ except ImportError:
     LANCZOS = 1
 
 # AstrBot's recommended logger. If this fails, the environment is likely misconfigured.
-try:
-    from astrbot.api import logger
-except ImportError:
-    logger = logging.getLogger(__name__)
+
+from astrbot.api import logger
+
 
 try:
     # Attempt to import from the standard API path first.
     from astrbot.api.event import filter, AstrMessageEvent
-    from astrbot.api.star import Context, Star, register
+    from astrbot.api.star import Context, Star, register, StarTools
     import astrbot.api.message_components as Comp
     from astrbot.core.utils.session_waiter import session_waiter, SessionController
     from astrbot.api import AstrBotConfig
@@ -44,6 +44,13 @@ except ImportError:
     from astrbot.core.plugin import Plugin as Star, Context, register, filter, AstrMessageEvent  # type: ignore
     import astrbot.core.message_components as Comp  # type: ignore
     from astrbot.core.utils.session_waiter import session_waiter, SessionController  # type: ignore
+    # Fallback for StarTools if it's missing in older versions
+    class StarTools:
+        @staticmethod
+        def get_data_dir(plugin_name: str) -> Path:
+            # Provide a fallback implementation that mimics the original get_db_path logic
+            # This path is relative to the directory containing the 'plugins' folder
+            return Path(__file__).parent.parent.parent.parent / 'data' / 'plugins_data' / plugin_name
 
 
 # --- 插件元数据 ---
@@ -57,18 +64,7 @@ PLUGIN_REPO_URL = "https://github.com/nichinichisou0609/astrbot_plugin_pjsk_gues
 # --- 数据库管理 ---
 def get_db_path(context: Context, plugin_dir: Path) -> str:
     """获取数据库文件的路径，确保它在插件的数据目录中"""
-    config = context.get_config()
-    # Safely get data_path from config
-    data_path = config.get('data_path')
-    if not data_path:
-        logger.warning("'data_path' not found in config. Falling back to a directory outside the plugin folder.")
-        # Fallback to a directory outside the plugin folder: .../data/
-        # plugin_dir is .../plugins/astrbot_plugin_guess_card
-        # plugin_dir.parent is .../plugins
-        # plugin_dir.parent.parent is .../data
-        data_path = plugin_dir.parent.parent
-
-    plugin_data_dir = Path(str(data_path)) / 'plugins_data' / PLUGIN_NAME
+    plugin_data_dir = StarTools.get_data_dir(PLUGIN_NAME)
     os.makedirs(plugin_data_dir, exist_ok=True)
     return str(plugin_data_dir / "guess_card_data.db")
 
@@ -169,6 +165,7 @@ class GuessCardPlugin(Star):  # type: ignore
         init_db(self.db_path)
         self.guess_cards, self.characters_map = load_card_data(self.resources_dir)
         self.last_game_end_time = {} # 存储每个会话的最后游戏结束时间
+        self.http_session = None
 
         # --- 新增：创建受控的线程池 ---
         self.executor = ThreadPoolExecutor(max_workers=1)
@@ -184,6 +181,9 @@ class GuessCardPlugin(Star):  # type: ignore
 
         if not self.guess_cards or not self.characters_map:
             logger.error("插件初始化失败，缺少必要的卡牌数据文件。插件功能将受限。")
+        
+        if not aiohttp:
+            logger.warning("`aiohttp` 模块未安装，远程图片功能将受限或性能较差。建议安装: pip install aiohttp")
 
         # --- 新增：初始化后台任务句柄 ---
         self._cleanup_task = None
@@ -193,10 +193,19 @@ class GuessCardPlugin(Star):  # type: ignore
         # --- 新增：启动周期性清理任务 ---
         self._cleanup_task = asyncio.create_task(self._periodic_cleanup_task())
 
+    async def _get_session(self) -> Optional['aiohttp.ClientSession']:
+        """延迟初始化并获取 aiohttp session"""
+        if not aiohttp:
+            return None
+        if self.http_session is None or self.http_session.closed:
+            self.http_session = aiohttp.ClientSession()
+        return self.http_session
+
     def _execute_ping_request(self, ping_url: str):
         """[Helper] Synchronous function to execute the ping request. Meant for ThreadPoolExecutor."""
         try:
             # urlopen is a blocking call, perfect for the executor.
+            from urllib.request import urlopen
             with urlopen(ping_url, timeout=2):
                 pass  # We just need the request to be made.
         except Exception as e:
@@ -251,7 +260,7 @@ class GuessCardPlugin(Star):  # type: ignore
                 return None
             return f"{base_url}/{'/'.join(Path(relative_path).parts)}"
 
-    def _open_image(self, relative_path: str) -> Optional[Image.Image]:
+    async def _open_image(self, relative_path: str) -> Optional[Image.Image]:
         """打开一个资源图片，无论是本地路径还是远程URL。"""
         source = self._get_resource_path_or_url(relative_path)
         if not source:
@@ -259,10 +268,15 @@ class GuessCardPlugin(Star):  # type: ignore
         
         try:
             if isinstance(source, str) and source.startswith(('http://', 'https://')):
-                with urlopen(source) as response:
-                    img = Image.open(response)
-                    img.load() 
-                    return img
+                session = await self._get_session()
+                if not session:
+                    logger.error("无法获取远程图片: `aiohttp` 模块未安装。")
+                    return None
+                
+                async with session.get(source) as response:
+                    response.raise_for_status() # Will raise an error for non-200 status
+                    image_data = await response.read()
+                    return Image.open(io.BytesIO(image_data))
             else:
                 return Image.open(source)
         except (URLError, Exception) as e:
@@ -291,7 +305,7 @@ class GuessCardPlugin(Star):  # type: ignore
         """获取数据库连接"""
         return sqlite3.connect(self.db_path)
 
-    def _create_options_image(self, options: List[Dict], cols: int = 3) -> Optional[str]:
+    async def _create_options_image(self, options: List[Dict], cols: int = 3) -> Optional[str]:
         """根据提供的选项（缩略图）列表生成一个网格状的选项图片"""
         if not options:
             return None
@@ -324,7 +338,7 @@ class GuessCardPlugin(Star):  # type: ignore
             y = padding + row_idx * (thumb_h + text_h + padding)
 
             try:
-                thumb_img = self._open_image(option['relative_thumb_path'])
+                thumb_img = await self._open_image(option['relative_thumb_path'])
                 if not thumb_img: continue
                 
                 thumb = thumb_img.convert("RGBA").resize((thumb_w, thumb_h), LANCZOS)
@@ -543,7 +557,7 @@ class GuessCardPlugin(Star):  # type: ignore
             if options:
                 # 横向最多显示5个，让图片比例协调
                 cols = min(len(options), 5)
-                options_img_path = self._create_options_image(options, cols=cols)
+                options_img_path = await self._create_options_image(options, cols=cols)
             # --- V1.1.0 功能结束 ---
 
             # 在后台日志中输出答案，方便测试
@@ -1011,5 +1025,8 @@ class GuessCardPlugin(Star):  # type: ignore
         logger.info("正在关闭猜卡插件的后台任务...")
         if self._cleanup_task:
             self._cleanup_task.cancel()
+        if self.http_session and not self.http_session.closed:
+            await self.http_session.close()
+            logger.info("aiohttp session已关闭。")
         logger.info("猜卡插件已终止。")
-        pass 
+        pass
