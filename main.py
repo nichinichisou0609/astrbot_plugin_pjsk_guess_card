@@ -51,7 +51,7 @@ PLUGIN_NAME = "pjsk_guess_card"
 PLUGIN_AUTHOR = "nichinichisou"
 PLUGIN_DESCRIPTION = "PJSK猜卡插件"
 PLUGIN_VERSION = "1.1.1" # 版本升级
-PLUGIN_REPO_URL = "https://github.com/your/repo"
+PLUGIN_REPO_URL = "https://github.com/nichinichisou0609/astrbot_plugin_pjsk_guess_card"
 
 
 # --- 数据库管理 ---

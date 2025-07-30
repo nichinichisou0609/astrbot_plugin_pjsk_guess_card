@@ -205,3 +205,17 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# --- Custom plugin ignores ---
+
+# Ignore dynamically generated images
+output/
+
+# Ignore all contents of the resources directory...
+resources/*
+
+# ...but re-include the essential files.
+!resources/characters.json
+!resources/font.ttf
+!resources/guess_cards.json
+!resources/ranking_bg.png
