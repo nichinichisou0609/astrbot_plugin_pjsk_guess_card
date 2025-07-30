@@ -14,8 +14,6 @@ from datetime import datetime
 from pilmoji import Pilmoji
 from urllib.error import URLError
 from urllib.parse import urlparse
-from concurrent.futures import ThreadPoolExecutor
-import aiohttp
 
 
 try:
@@ -167,9 +165,6 @@ class GuessCardPlugin(Star):  # type: ignore
         self.last_game_end_time = {} # 存储每个会话的最后游戏结束时间
         self.http_session = None
 
-        # --- 新增：创建受控的线程池 ---
-        self.executor = ThreadPoolExecutor(max_workers=1)
-
         # 新增：创建角色名到ID的映射
         self.character_name_to_id_map = {
             char['name'].lower(): char_id for char_id, char in self.characters_map.items()
@@ -201,17 +196,6 @@ class GuessCardPlugin(Star):  # type: ignore
             self.http_session = aiohttp.ClientSession()
         return self.http_session
 
-    def _execute_ping_request(self, ping_url: str):
-        """[Helper] Synchronous function to execute the ping request. Meant for ThreadPoolExecutor."""
-        try:
-            # urlopen is a blocking call, perfect for the executor.
-            from urllib.request import urlopen
-            with urlopen(ping_url, timeout=2):
-                pass  # We just need the request to be made.
-        except Exception as e:
-            # It's better to log this for debugging, even if we don't let it crash.
-            logger.warning(f"Stats ping to {ping_url} failed: {e}")
-
     async def _send_stats_ping(self, game_type: str):
         """(已重构) 向专用统计服务器的5000端口发送GET请求。"""
         if self.config.get("use_local_resources", True):
@@ -222,6 +206,11 @@ class GuessCardPlugin(Star):  # type: ignore
             return
 
         try:
+            session = await self._get_session()
+            if not session:
+                logger.warning("aiohttp not installed, cannot send stats ping.")
+                return
+
             # 从资源URL中提取协议和主机名，然后强制使用5000端口
             parsed_url = urlparse(resource_url_base)
             stats_server_root = f"{parsed_url.scheme}://{parsed_url.hostname}:5000"
@@ -229,11 +218,11 @@ class GuessCardPlugin(Star):  # type: ignore
             # 构建最终的统计请求URL
             ping_url = f"{stats_server_root}/stats_ping/{game_type}.ping"
 
-            # 在后台线程池中发送请求
-            loop = asyncio.get_running_loop()
-            loop.run_in_executor(self.executor, self._execute_ping_request, ping_url)
+            # 异步发送请求
+            async with session.get(ping_url, timeout=2):
+                pass  # We just need the request to be made.
         except Exception as e:
-            logger.error(f"无法调度统计ping任务: {e}")
+            logger.warning(f"Stats ping to {ping_url} failed: {e}")
 
     async def _periodic_cleanup_task(self):
         """每隔一小时自动清理一次 output 目录。"""
