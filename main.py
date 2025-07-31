@@ -454,8 +454,9 @@ class GuessCardPlugin(Star):  # type: ignore
         time_since_last_game = time.time() - last_end_time
 
         if time_since_last_game < cooldown:
-            remaining_time = int(cooldown - time_since_last_game)
-            yield event.plain_result(f"嗯......休息 {remaining_time} 秒再玩吧......")
+            remaining_time = cooldown - time_since_last_game
+            time_display = f"{remaining_time:.3f}" if remaining_time < 1 else str(int(remaining_time))
+            yield event.plain_result(f"嗯......休息 {time_display} 秒再玩吧......")
         
         elif session_id in self.context.active_game_sessions:
             yield event.plain_result("......有一个正在进行的游戏了呢。")
